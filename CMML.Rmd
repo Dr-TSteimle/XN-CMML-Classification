@@ -1,0 +1,214 @@
+---
+title: "Machine learning R notebook: classification of CMML with XN blood cell analyzer parameters"
+author: Dr. Thomas Steimlé
+date: 4 Septembre 2017
+output: 
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+library(tidyverse)
+library(DT)
+library(pROC)
+library(janitor)
+library(rgl)
+library("corrplot")
+library("Hmisc")
+knit_hooks$set(webgl = hook_webgl)
+```
+
+## Loading and filtering the data
+
++ Data were extracted directly from the XN without the columns "Patient Name", "Birth", "Sex" and "Patient Comment".
+
+```{r, warning=FALSE}
+all_data <- read_tsv('all_data.tsv', show_col_types = F)
+
+datatable(all_data[1:6,], 
+          extensions = 'FixedColumns',
+          options = list(
+            dom = 't',
+            scrollX = TRUE,
+            scrollCollapse = TRUE)
+)
+```
+
+
++ Adding know CMML cases and control into the group column.
+
+```{r}
+# Add a column "group" with the diagnostic status
+kwown_cases <- c("201515417GT","201610505ZA","201507920GB","201609745SN",
+                 "201606840HH","201610171XS","201501118XH","201516218GU",
+                 "201516217FL", "201706074HT","201702859SF","201605052AB",
+                 "8003220UF","201218685RB","201401432UL","201610003PZ",
+                 "200507614FK","201106729KF","201613527HA","201301011KG",
+                 "201514069KU","201611203TS","201609197TG","201516217FL",
+                 "201600477HN","201604926MT","201515650FZ","198107906RP",
+                 "201506180DR")
+
+all_data <- all_data %>% 
+  mutate(group = ifelse(`Patient ID` %in% kwown_cases, 'CMML', 
+                        ifelse(grepl("^MEDECINE DU", `Doctor Name`), 
+                               'CTRL', 'OTHER')), 
+         .before = "Patient ID") %>%
+  filter(!is.na(group)) %>%
+  filter(duplicated("Sample No.") == F) %>%
+  # removing uncertain values where the WBC is low
+  mutate(across(c("[NE-WX]","[NE-WY]","[NE-WZ]",
+                  "[MO-WX]","[MO-WY]","[MO-WZ]",
+                  "[LY-WX]","[LY-WY]","[LY-WZ]"), 
+                ~ ifelse(`WBC(10^3/uL)` < 1 , NA, .x)))
+
+datatable(all_data[1:6,], 
+          extensions = 'FixedColumns',
+          options = list(
+            dom = 't',
+            scrollX = TRUE,
+            scrollCollapse = TRUE)
+)
+```
+
+
++ Select columns with numeric parameters
+
+```{r}
+param_columns <- seq(from = 90, to = 248, by = 2)
+num_data <- all_data %>% .[, param_columns] %>% select(where(is.numeric)) 
+
+datatable(num_data[1:6,], extensions = 'FixedColumns',
+  options = list(
+  dom = 't',
+  scrollX = TRUE,
+  scrollCollapse = TRUE
+))
+```
+
+## Data Description 
+
+### Correlation
+
+```{r}
+res_cor <- rcorr(as.matrix(num_data))
+
+png(filename = "CMML_cor.png",width = 4500,height = 4000)
+corrplot(res_cor$r, type="upper", diag= F, order="hclust",
+         p.mat = res_cor$P, sig.level = 0.01, insig = "blank", 
+         tl.cex=3, cl.cex=5)
+dev.off()
+
+```
+![](CMML_cor.png)
+
+### Verify normality and keep normal parameters
+
+```{r}
+rand_row <- sample(1:nrow(num_data), size = 5000, replace = F)
+
+nor_test <- sample_n(num_data, 5000) %>% 
+  summarise(across(everything(), ~ shapiro.test(.x)$p.value)) 
+not_norm <- colnames(num_data)[which(!(nor_test < .001))] 
+norm_num_data <- num_data[, !(colnames(num_data) %in% not_norm)]
+
+not_norm
+```
++ Removed columns : `r not_norm`
+
+### T-test between CMML cases and controls for each parameters
+
+```{r}
+welch_results <- matrixTests::col_t_welch(
+    norm_num_data[all_data$group == 'CMML',], 
+    norm_num_data[all_data$group == 'CTRL',]
+  ) %>%
+  mutate(`param` = rownames(.), .before = "obs.x") %>%
+  as_tibble() %>%
+  arrange(pvalue) %>%
+  relocate(pvalue, .after = "param")
+
+datatable(welch_results, extensions = 'FixedColumns',
+  options = list(
+  dom = 't',
+  scrollX = TRUE,
+  scrollCollapse = TRUE
+))
+```
+## Parameters selection
+
++ Based on these results we choose to keep uncorrelated parameters with significant difference between groups, we also choose to filter out raw counts parameters (impacted by blood transfusion) and we ended selecting: [NE-WX], RDW-SD(fL), PDW(fL).
+
+```{r}
+training_data <- all_data %>% 
+  select(c("group", "[NE-WX]", "RDW-SD(fL)", "PDW(fL)")) %>%
+  filter(group %in% c('CMML', 'CTRL')) %>%
+  mutate(group = ifelse(group == 'CMML', 1, 0)) %>%
+  na.omit()
+
+datatable(training_data)
+```
+
+## Logistic regression
+
++ For this regression a binomial distribution is fitted
+
+```{r}
+mod <- glm(formula = group ~ ., 
+           family =  binomial(link = "logit"), 
+           data = training_data %>% clean_names())
+mod
+```
++ Which can be solved to :
+
+$$P = \frac{1}{1 + e^{-\left(`r mod$coefficients["(Intercept)"] `+`r mod$coefficients["rdw_sd_f_l"]`\times RDW-SD(fl)+ `r mod$coefficients["pdw_f_l"]`\times PDW(fl)+`r mod$coefficients["ne_wx"]`\times[NE-WX] \right)}}$$
+
++ And plotted in 3D (require chrome or chromium):
+
+```{r testgl, webgl=TRUE}
+library(plot3D)
+plot3d(
+  training_data %>% filter(group == 1) %>% select(-group), 
+  col="red", 
+  xlim=c(230,585),
+  ylim = c(27,110),
+  zlim=c(5,25), 
+  xlab="[NE-WX]",
+  ylab="RDW-SD(fl)",
+  zlab="PDW(fl)")
+
+points3d(training_data %>% filter(group == 0) %>% select(-group), col="blue")
+planes3d(mod$coefficients[2], mod$coefficients[3],
+         mod$coefficients[4], mod$coefficients[1])
+
+```
+
+## ROC
++ The resulting ROC curve is :
+```{r}
+prob_cmml <- function(mod, NEWX, RDWSDfL, PDWfL) {
+  if(any(is.na(c(NEWX, RDWSDfL, PDWfL)))) { return(NA)} else {
+    return(1/(1+exp(-(mod$coefficients["rdw_sd_f_l"]*as.numeric(RDWSDfL)
+                      +mod$coefficients["ne_wx"]*as.numeric(NEWX)
+                      +mod$coefficients["pdw_f_l"]*as.numeric(PDWfL)
+                      +mod$coefficients[1]))))
+  }
+}
+
+res <- training_data %>% 
+  rowwise() %>% 
+  mutate(score = prob_cmml(mod, `[NE-WX]`, `RDW-SD(fL)`, `PDW(fL)`))
+
+rre <- plot.roc(res$group, res$score, 
+                levels = as.factor(c(0,1)), 
+                direction = '<', percent = T, ci = T, 
+                of = "thresholds", thresholds = "best",
+                print.thres = "best")
+```
+
++ The best threshold for these training data is `r as.double(rownames(rre$ci$specificity))` (Sp =  `r rre$ci$specificity[2]` %, Se = `r rre$ci$sensitivity[2]` %)
+
+## Future
+
++ Test formula on a prospective validation cohort.
