@@ -164,7 +164,7 @@ mod
 
 $$P = \frac{1}{1 + e^{-\left(`r mod$coefficients["(Intercept)"] `+`r mod$coefficients["rdw_sd_f_l"]`\times RDW-SD(fl)+ `r mod$coefficients["pdw_f_l"]`\times PDW(fl)+`r mod$coefficients["ne_wx"]`\times[NE-WX] \right)}}$$
 
-+ And plotted in 3D (require chrome or chromium):
++ And plotted in 3D:
 
 ```{r testgl, webgl=TRUE}
 library(plot3D)
